@@ -33,26 +33,27 @@ def conectar_bd():
         )
     ''')
     
-    # Itens (Seriais) - Criando com suporte a observações e responsável
+    # Itens (Seriais)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS itens_agendamento (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             agendamento_id INTEGER,
             serial TEXT,
             status_item TEXT DEFAULT 'Solicitação pendente',
-            observacao TEXT DEFAULT '',
-            almoxarife_responsavel TEXT DEFAULT '',
             FOREIGN KEY(agendamento_id) REFERENCES agendamentos(id)
         )
     ''')
     
-    # Migrações automáticas de segurança para bancos já existentes
-    cursor.execute("PRAGMA table_info(itens_agendamento)")
-    colunas = [col[1] for col in cursor.fetchall()]
-    if 'observacao' not in colunas:
+    # Migrações seguras com try/except para evitar o erro de coluna duplicada
+    try:
         cursor.execute("ALTER TABLE itens_agendamento ADD COLUMN observacao TEXT DEFAULT ''")
-    if 'almoxarife_responsavel' not in colunas:
+    except sqlite3.OperationalError:
+        pass  # Coluna já existe, ignora o erro
+        
+    try:
         cursor.execute("ALTER TABLE itens_agendamento ADD COLUMN almoxarife_responsavel TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # Coluna já existe, ignora o erro
     
     # Usuário Admin Padrão
     cursor.execute("SELECT * FROM usuarios WHERE cpf = '000'")
@@ -72,7 +73,7 @@ if 'logado' not in st.session_state:
     st.session_state['usuario_nome'] = ""
     st.session_state['perfil'] = "Volante"
 
-# Opções de status atualizadas
+# Lista de opções de Status
 LISTA_STATUS_OPCOES = [
     "Solicitação pendente",
     "Aguardando devolução", 
@@ -163,12 +164,12 @@ else:
                     st.success(f"✅ Protocolo #{id_p} criado com sucesso!")
                     st.rerun()
 
-        # ABA 2: Triagem Ativa (Pastas compactas)
+        # ABA 2: Triagem Ativa
         with aba_triagem:
             st.subheader("Fila de Triagem Atual")
             
-            # Filtro de Data Inteligente
-            data_filtro = st.date_input("📅 Filtrar Pastas por Data específica:", value=None, help="Deixe em branco para ver todas")
+            # Filtro por Data Inteligente
+            data_filtro = st.date_input("📅 Filtrar Pastas por Data específica:", value=None, help="Deixe em branco para visualizar todas")
             
             query = "SELECT id, nome, data, hora, status FROM agendamentos WHERE status = 'Aguardando Triagem'"
             if data_filtro:
@@ -177,80 +178,88 @@ else:
             df_pastas = pd.read_sql_query(query, conn)
             
             if df_pastas.empty:
-                st.info("Nenhuma pasta pendente localizada para os filtros atuais.")
+                st.info("Nenhuma pasta de triagem ativa encontrada para este filtro.")
             else:
                 for idx, row in df_pastas.iterrows():
                     id_proto = int(row['id'])
                     
-                    # Layout super enxuto e harmonioso
+                    # Container compacto e elegante
                     with st.container(border=True):
                         c1, c2, c3 = st.columns([5, 3, 2])
                         c1.markdown(f"📁 **Protocolo #{id_proto}** | Volante: {row['nome']}")
                         c2.markdown(f"📅 Previsão: {row['data']} às {row['hora']}")
                         
-                        if c3.button("📦 Arquivar/Encerrar", key=f"f_{id_proto}", type="primary", use_container_width=True):
+                        if c3.button("📦 Encerrar Protocolo", key=f"f_{id_proto}", type="primary", use_container_width=True):
                             cursor.execute("UPDATE agendamentos SET status = 'Finalizado' WHERE id = ?", (id_proto,))
                             conn.commit()
-                            st.success(f"Protocolo #{id_proto} arquivado com sucesso!")
+                            st.success(f"Protocolo #{id_proto} guardado no histórico!")
                             st.rerun()
                             
                         with st.expander("📄 Abrir Lista de Seriais Bipados", expanded=False):
                             cursor.execute("SELECT id, serial, status_item, observacao, almoxarife_responsavel FROM itens_agendamento WHERE agendamento_id = ?", (id_proto,))
                             itens = cursor.fetchall()
                             
+                            # Cabeçalho da Mini Tabela
+                            col_h1, col_h2, col_h3, col_h4 = st.columns([2.5, 3, 3, 1.5])
+                            col_h1.caption("**Serial**")
+                            col_h2.caption("**Mudar Status**")
+                            col_h3.caption("**Observação Interna**")
+                            col_h4.caption("**Modificado por**")
+                            
                             for item_id, serial, status_item, obs, resp in itens:
-                                # Organização perfeita em linha horizontal
                                 col_srl, col_st, col_obs, col_resp = st.columns([2.5, 3, 3, 1.5])
                                 
                                 col_srl.markdown(f"🔹 `{serial}`")
                                 
-                                # Status
+                                # Seleção de Status
                                 idx_st = LISTA_STATUS_OPCOES.index(status_item) if status_item in LISTA_STATUS_OPCOES else 0
                                 n_st = col_st.selectbox("Status", LISTA_STATUS_OPCOES, index=idx_st, key=f"st_{item_id}", label_visibility="collapsed")
                                 
-                                # Observação
-                                n_obs = col_obs.text_input("Obs", value=obs, key=f"obs_{item_id}", placeholder="Adicionar nota...", label_visibility="collapsed")
+                                # Campo de Observação na mesma linha
+                                n_obs = col_obs.text_input("Obs", value=obs, key=f"obs_{item_id}", placeholder="Escreva uma observação...", label_visibility="collapsed")
                                 
-                                # Responsável
+                                # Nome do Almoxarife Responsável registrado ao lado
                                 if resp:
-                                    col_resp.caption(f"✍️ {resp}")
+                                    col_resp.markdown(f"✍️ `{resp}`")
                                 else:
-                                    col_resp.caption("⏱️ Sem modif.")
+                                    col_resp.caption("*Sem alterações*")
                                     
-                                # Salvamento dinâmico se houver mudança
+                                # Gravação imediata no Banco de Dados se houver qualquer modificação
                                 if n_st != status_item or n_obs != obs:
                                     cursor.execute(
                                         "UPDATE itens_agendamento SET status_item = ?, observacao = ?, almoxarife_responsavel = ? WHERE id = ?",
                                         (n_st, n_obs, st.session_state['usuario_nome'], item_id)
                                     )
                                     conn.commit()
-                                    st.toast(f"Salvo: {serial}")
+                                    st.toast(f"Alteração salva para o serial {serial}!")
                                     st.rerun()
                                     
-                            # Exportador Individual da Pasta
+                            # Exportação individual da pasta
                             df_rel = pd.read_sql_query(f"SELECT serial as 'Serial', status_item as 'Status', observacao as 'Observações', almoxarife_responsavel as 'Almoxarife' FROM itens_agendamento WHERE agendamento_id = {id_proto}", conn)
                             st.download_button("📥 Baixar Planilha desta Pasta (.csv)", gerar_csv_excel(df_rel), f"Protocolo_{id_proto}.csv", "text/csv", use_container_width=True, key=f"dl_{id_proto}")
 
-        # ABA 3: Histórico de Devoluções Salvas (Pedidos que já foram encerrados)
+        # ABA 3: Histórico de Devoluções (Salvos permanentemente)
         with aba_historico:
-            st.subheader("📜 Histórico de Protocolos Finalizados")
+            st.subheader("📜 Histórico de Protocolos Encerrados")
             df_hist = pd.read_sql_query("SELECT id as 'Protocolo', nome as 'Volante', data as 'Data Fechamento', hora as 'Horário' FROM agendamentos WHERE status = 'Finalizado' ORDER BY id DESC", conn)
             
             if df_hist.empty:
-                st.info("Nenhum histórico registrado até o momento.")
+                st.info("Nenhum protocolo foi finalizado até o momento.")
             else:
                 st.dataframe(df_hist, use_container_width=True)
                 
-                proto_busca = st.number_input("Digite o número do Protocolo do histórico para auditar os seriais:", min_value=1, step=1)
-                if st.button("🔍 Buscar Detalhes no Arquivo"):
+                st.divider()
+                st.markdown("### 🔍 Auditoria de Protocolos Arquivados")
+                proto_busca = st.number_input("Insira o número do Protocolo do histórico para verificar os seriais:", min_value=1, step=1)
+                if st.button("Buscar Detalhes no Arquivo", use_container_width=True):
                     df_detalhe = pd.read_sql_query(f"SELECT serial as 'Serial', status_item as 'Status Final', observacao as 'Observações', almoxarife_responsavel as 'Almoxarife Auditou' FROM itens_agendamento WHERE agendamento_id = {int(proto_busca)}", conn)
                     if not df_detalhe.empty:
-                        st.markdown(f"### 📑 Itens do Protocolo #{int(proto_busca)}")
+                        st.markdown(f"#### 📑 Itens do Protocolo Registrado #{int(proto_busca)}")
                         st.table(df_detalhe)
                     else:
-                        st.error("Protocolo não localizado ou não possui itens cadastrados.")
+                        st.error("Protocolo não localizado ou não possui itens arquivados.")
 
-        # ABA 4: Permissões
+        # ABA 4: Gerenciamento de Permissões
         with aba_usuarios:
             st.subheader("Gerenciar Usuários")
             u_cad = cursor.execute("SELECT cpf, nome, perfil FROM usuarios WHERE cpf != '000'").fetchall()
@@ -264,9 +273,7 @@ else:
                         conn.commit()
                         st.rerun()
 
-    # =========================================================================
-    # FLUXO DO VOLANTE
-    # =========================================================================
+    # --- FLUXO DO VOLANTE ---
     else:
         st.title("📦 Área do Volante")
         cursor.execute("SELECT id, data, hora, status FROM agendamentos WHERE cpf = ? AND status != 'Finalizado'", (st.session_state['usuario_cpf'],))
@@ -278,7 +285,7 @@ else:
             df_m = pd.read_sql_query(f"SELECT serial as 'Serial', status_item as 'Meu Status', observacao as 'Observação Almoxarifado' FROM itens_agendamento WHERE agendamento_id = {ativo[0]}", conn)
             st.dataframe(df_m, use_container_width=True)
         else:
-            st.subheader("Criar Solicitação")
+            st.subheader("Criar Solicitação de Devolução")
             col1, col2 = st.columns(2)
             d_v = col1.date_input("Data de Entrega", min_value=datetime.date.today())
             h_v = col2.time_input("Horário Estimado")
