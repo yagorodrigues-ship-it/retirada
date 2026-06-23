@@ -3,16 +3,6 @@ import pandas as pd
 import datetime
 import sqlite3
 from io import BytesIO
-import subprocess
-import sys
-
-# --- MECANISMO DE AUTO-CORREÇÃO DE DEPENDÊNCIAS ---
-# Tenta importar o xlsxwriter. Se falhar, força a instalação em tempo de execução.
-try:
-    import xlsxwriter
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "xlsxwriter"])
-    import xlsxwriter
 
 # Configuração da página
 st.set_page_config(page_title="Almoxarifado Inteligente", layout="wide", page_icon="📦")
@@ -69,18 +59,12 @@ def verificar_regras_agendamento(data_selecionada, hora_selecionada):
             
     return True, ""
 
-def gerar_excel(lista_seriais):
-    buffer = BytesIO()
+def gerar_excel_nativo(lista_seriais):
     df_seriais = pd.DataFrame({"Seriais dos Equipamentos": lista_seriais})
-    try:
-        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-            df_seriais.to_excel(writer, index=False, sheet_name='Seriais_Devolvidos')
-        return buffer.getvalue(), df_seriais
-    except Exception:
-        # Fallback de segurança usando o mecanismo padrão do pandas caso falte engine
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df_seriais.to_excel(writer, index=False, sheet_name='Seriais_Devolvidos')
-        return buffer.getvalue(), df_seriais
+    # Converte os dados nativamente para CSV com formatação compatível com Excel (UTF-8 com BOM e ponto-e-vírgula)
+    # Isso abre direto no Excel perfeitamente sem quebrar acentos ou colunas
+    csv_data = df_seriais.to_csv(index=False, sep=';', encoding='utf-8-sig')
+    return csv_data.encode('utf-8-sig'), df_seriais
 
 # --- TELA DE LOGIN E CADASTRO ---
 if not st.session_state['logado']:
@@ -147,7 +131,6 @@ else:
         st.title("🔑 Painel de Triagem (Visão do Almoxarife)")
         st.markdown("Gerencie as solicitações recebidas, valide os aparelhos e mude o status para liberação do balcão.")
         
-        # Carrega os agendamentos ativos na tela do almoxarife
         df_agendamentos = pd.read_sql_query("SELECT * FROM agendamentos WHERE status != 'Finalizado'", conn)
         
         if df_agendamentos.empty:
@@ -160,15 +143,15 @@ else:
                     st.markdown(f"**Data Planejada:** {row['data']} às {row['hora']} | **CPF Volante:** {row['cpf']}")
                     
                     # Tabela visível dos aparelhos bipados
-                    dados_excel, df_visualizar = gerar_excel(lista_seriais)
+                    dados_excel, df_visualizar = gerar_excel_nativo(lista_seriais)
                     st.dataframe(df_visualizar, use_container_width=True)
                     
-                    # Botão de exportação exclusivo para o almoxarife baixar
+                    # Botão de exportação nativo Excel (.csv configurado para Excel)
                     st.download_button(
-                        label="📥 Exportar Fila para Excel (.xlsx)",
+                        label="📥 Exportar Fila para Excel (.csv)",
                         data=dados_excel,
-                        file_name=f"almoxarifado_protocolo_{row['id']}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        file_name=f"almoxarifado_protocolo_{row['id']}.csv",
+                        mime="text/csv",
                         key=f"excel_almox_{row['id']}"
                     )
                     
@@ -202,9 +185,8 @@ else:
             proto_id, proto_data, proto_hora, proto_status, proto_seriais = agendamento_ativo
             lista_seriais_volante = [s.strip() for s in proto_seriais.split(",") if s.strip()]
             
-            st.info(f"📆 Você possui uma solicitação ativa (Protocolo #{proto_id}) marcada para o dia {proto_data} às {proto_hora}.")
+            st.info(f"📆 Você possui uma solicitação activa (Protocolo #{proto_id}) marcada para o dia {proto_data} às {proto_hora}.")
             
-            # Avisos dinâmicos baseados no que o Almoxarife mudou na tela dele
             if proto_status == "Aguardando Triagem":
                 st.warning("⏳ Status Atual: **Aguardando Triagem**. Aguarde o almoxarife validar seus seriais para liberar sua ida ao balcão.")
             elif proto_status == "Disponível para Receber":
@@ -215,19 +197,18 @@ else:
             st.subheader(f"📁 Minha Pasta de Entrega - Protocolo #{proto_id}")
             st.markdown("Confira abaixo todos os aparelhos que você bipou nesta solicitação:")
             
-            dados_excel_volante, df_visualizar_volante = gerar_excel(lista_seriais_volante)
+            dados_excel_volante, df_visualizar_volante = gerar_excel_nativo(lista_seriais_volante)
             st.dataframe(df_visualizar_volante, use_container_width=True)
             
             st.download_button(
-                label="📥 Exportar Meus Aparelhos Bipados para Excel (.xlsx)",
+                label="📥 Exportar Meus Aparelhos Bipados para Excel (.csv)",
                 data=dados_excel_volante,
-                file_name=f"minha_lista_protocolo_{proto_id}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                file_name=f"minha_lista_protocolo_{proto_id}.csv",
+                mime="text/csv",
                 key=f"excel_volante_{proto_id}"
             )
             
         else:
-            # Tela Inicial para criar agendamentos (Apenas aparece se ele não tiver nenhuma pendente)
             st.header("Agende sua Nova Entrega")
             col1, col2 = st.columns(2)
             with col1:
