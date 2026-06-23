@@ -6,19 +6,28 @@ import sqlite3
 # Configuração da página
 st.set_page_config(page_title="Almoxarifado Inteligente - Gestão", layout="wide", page_icon="📦")
 
-# --- BANCO DE DADOS (Configuração Atualizada) ---
+# --- BANCO DE DADOS (Configuração Corrigida com Migração Automática) ---
 def conectar_bd():
     conn = sqlite3.connect('almoxarifado.db')
     cursor = conn.cursor()
-    # Adicionada coluna 'perfil' para gerenciar se é Volante ou Almoxarife
+    
+    # 1. Cria a tabela base caso ela não exista
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS usuarios (
             cpf TEXT PRIMARY KEY,
             nome TEXT,
-            senha TEXT,
-            perfil TEXT DEFAULT 'Volante'
+            senha TEXT
         )
     ''')
+    
+    # 2. MECANISMO DE MIGRAÇÃO: Verifica se a coluna 'perfil' já existe, se não existir, adiciona
+    cursor.execute("PRAGMA table_info(usuarios)")
+    colunas = [col[1] for col in cursor.fetchall()]
+    if 'perfil' not in colunas:
+        cursor.execute("ALTER TABLE usuarios ADD COLUMN perfil TEXT DEFAULT 'Volante'")
+        conn.commit()
+
+    # 3. Cria as outras tabelas necessárias para os itens e agendamentos
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS agendamentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -29,7 +38,7 @@ def conectar_bd():
             status TEXT DEFAULT 'Aguardando Triagem'
         )
     ''')
-    # Tabela filha para gerenciar o status individual de cada serial bipado
+    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS itens_agendamento (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,10 +49,12 @@ def conectar_bd():
         )
     ''')
     
-    # Garante que o usuário admin padrão exista e seja Almoxarife
+    # 4. Garante que o usuário admin padrão exista (especificando as colunas explicitamente)
     cursor.execute("SELECT * FROM usuarios WHERE cpf = '000'")
     if not cursor.fetchone():
-        cursor.execute("INSERT INTO usuarios VALUES ('000', 'Administrador Principal', 'admin', 'Almoxarife')")
+        cursor.execute(
+            "INSERT INTO usuarios (cpf, nome, senha, perfil) VALUES ('000', 'Administrador Principal', 'admin', 'Almoxarife')"
+        )
         
     conn.commit()
     return conn
@@ -57,7 +68,7 @@ if 'logado' not in st.session_state:
     st.session_state['usuario_cpf'] = ""
     st.session_state['usuario_nome'] = ""
     st.session_state['perfil'] = "Volante"
-    st.session_state['protocolo_detalhe'] = None  # Controla a nova tela de detalhes do admin
+    st.session_state['protocolo_detalhe'] = None  # Controla a tela de detalhes do admin
 
 # --- FUNÇÕES DE CONVERSÃO EXCEL/CSV NATIVO ---
 def gerar_excel_nativo(df):
@@ -121,11 +132,10 @@ else:
     # =========================================================================
     if st.session_state['perfil'] == 'Almoxarife':
         
-        # Se o admin clicou para ver os detalhes de uma pasta/protocolo específico, abre a NOVA TELA dedicada
+        # Tela de Detalhes de um protocolo específico
         if st.session_state['protocolo_detalhe'] is not None:
             id_proto = st.session_state['protocolo_detalhe']
             
-            # Busca metadados da pasta
             cursor.execute("SELECT nome, data, hora, status FROM agendamentos WHERE id = ?", (id_proto,))
             dados_p = cursor.fetchone()
             
@@ -137,7 +147,6 @@ else:
             st.markdown(f"**Volante:** {dados_p[0]} | **Previsão:** {dados_p[1]} às {dados_p[2]} | **Status Geral:** {dados_p[3]}")
             st.write("Altere abaixo o status individual de cada equipamento bipado:")
             
-            # Lista os itens da pasta
             cursor.execute("SELECT id, serial, status_item FROM itens_agendamento WHERE agendamento_id = ?", (id_proto,))
             itens = cursor.fetchall()
             
@@ -149,7 +158,6 @@ else:
                 "Aguardando aprovação de campo"
             ]
             
-            # Cria a estrutura de edição item por item
             for item_id, serial, status_atual in itens:
                 col_ser, col_stat = st.columns([4, 6])
                 with col_ser:
@@ -162,14 +170,12 @@ else:
                         index=idx_default,
                         key=f"sel_item_{item_id}"
                     )
-                    # Atualiza imediatamente no banco de dados se for mudado
                     if novo_status_item != status_atual:
                         cursor.execute("UPDATE itens_agendamento SET status_item = ? WHERE id = ?", (novo_status_item, item_id))
                         conn.commit()
                         st.toast(f"Status do serial {serial} atualizado!")
 
             st.markdown("---")
-            # Exportação dedicada da pasta para Excel/CSV
             df_export = pd.read_sql_query(f"SELECT serial as 'Serial', status_item as 'Status do Item' FROM itens_agendamento WHERE agendamento_id = {id_proto}", conn)
             dados_csv = gerar_excel_nativo(df_export)
             st.download_button(
@@ -215,7 +221,6 @@ else:
                 st.subheader("Controle de Níveis de Acesso")
                 st.markdown("Altere abaixo quem atua como Volante em campo e quem gerencia como Almoxarife no Balcão:")
                 
-                # Lista todos os usuários cadastrados (exceto o próprio admin master logado de CPF 000 para evitar bloqueios)
                 cursor.execute("SELECT cpf, nome, perfil FROM usuarios WHERE cpf != '000'")
                 usuarios_cadastrados = cursor.fetchall()
                 
@@ -249,7 +254,6 @@ else:
             st.info(f"📆 Você possui uma solicitação ativa (Protocolo #{proto_id}) marcada para o dia {proto_data} às {proto_hora}.")
             
             st.markdown("### 📋 Status dos Meus Equipamentos Bipados")
-            # Exibe a lista de itens com os status reais atualizados pelo almoxarife
             df_meus_itens = pd.read_sql_query(f"SELECT serial as 'Serial do Equipamento', status_item as 'Status de Triagem' FROM itens_agendamento WHERE agendamento_id = {proto_id}", conn)
             st.dataframe(df_meus_itens, use_container_width=True)
             
@@ -268,14 +272,12 @@ else:
                 if equipamentos_bipados.strip():
                     lista_limpa = [item.strip() for item in equipamentos_bipados.replace(",", "\n").split("\n") if item.strip()]
                     
-                    # Salva o cabeçalho do agendamento
                     cursor.execute(
                         "INSERT INTO agendamentos (cpf, nome, data, hora, status) VALUES (?, ?, ?, ?, 'Aguardando Triagem')",
                         (st.session_state['usuario_cpf'], st.session_state['usuario_nome'], str(data_agenda), str(hora_agenda)[:5])
                     )
                     novo_id_agendamento = cursor.lastrowid
                     
-                    # Salva cada serial separadamente na tabela de itens
                     for srl in lista_limpa:
                         cursor.execute("INSERT INTO itens_agendamento (agendamento_id, serial) VALUES (?, ?)", (novo_id_agendamento, srl))
                         
