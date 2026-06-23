@@ -42,9 +42,9 @@ if 'logado' not in st.session_state:
     st.session_state['usuario_nome'] = ""
     st.session_state['eh_almoxarife'] = False
 
-# --- FUNÇÕES DE VALIDAÇÃO DE HORÁRIO ---
+# --- FUNÇÕES DE VALIDAÇÃO E EXCEL ---
 def verificar_regras_agendamento(data_selecionada, hora_selecionada):
-    cursor.execute("SELECT hora FROM agendamentos WHERE data = ?", (str(data_selecionada),))
+    cursor.execute("SELECT hora FROM agendamentos WHERE data = ? AND status != 'Finalizado'", (str(data_selecionada),))
     agendamentos_dia = cursor.fetchall()
     
     nova_hora_minutos = hora_selecionada.hour * 60 + hora_selecionada.minute
@@ -53,12 +53,12 @@ def verificar_regras_agendamento(data_selecionada, hora_selecionada):
         h_atual = datetime.datetime.strptime(h, "%H:%M").time()
         atual_minutos = h_atual.hour * 60 + h_atual.minute
         
+        # Regra: Intervalo mínimo de 3 horas (180 minutos) entre agendamentos
         if abs(nova_hora_minutos - atual_minutos) < 180:
-            return False, f"⚠️ Horário indisponível! Outra pessoa agendou às {h}. Escolha um horário com 3 horas de diferença."
+            return False, f"⚠️ Horário indisponível! Outra pessoa agendou às {h}. É necessário um intervalo mínimo de 3 horas."
             
     return True, ""
 
-# Função auxiliar para gerar o arquivo Excel
 def gerar_excel(lista_seriais):
     buffer = BytesIO()
     df_seriais = pd.DataFrame({"Seriais dos Equipamentos": lista_seriais})
@@ -70,13 +70,13 @@ def gerar_excel(lista_seriais):
 if not st.session_state['logado']:
     st.title("📦 Acesso ao Sistema de Devolução")
     
-    aba_login, aba_cadastro = st.tabs(["🔐 Entrar no Sistema", "📝 Criar Cadastro"])
+    aba_login, aba_cadastro = st.tabs(["🔐 Entrar no Sistema", "📝 Criar Cadastro de Volante"])
     
     with aba_login:
         cpf_login = st.text_input("Digite seu CPF (ou 000 para Almoxarife)", key="login_cpf")
         senha_login = st.text_input("Senha", type="password", key="login_senha")
         
-        if st.button("Acessar", type="primary", use_container_width=True):
+        if st.button("Acessar Sistema", type="primary", use_container_width=True):
             if cpf_login == "000" and senha_login == "admin":  
                 st.session_state['logado'] = True
                 st.session_state['eh_almoxarife'] = True
@@ -91,9 +91,10 @@ if not st.session_state['logado']:
                     st.session_state['eh_almoxarife'] = False
                     st.rerun()
                 else:
-                    st.error("❌ Usuário ou senha incorretos.")
+                    st.error("❌ CPF ou Senha incorretos.")
                     
     with aba_cadastro:
+        st.markdown("### Cadastro exclusivo para novos Volantes")
         novo_cpf = st.text_input("Defina seu CPF")
         novo_nome = st.text_input("Nome Completo")
         nova_senha = st.text_input("Crie uma Senha", type="password")
@@ -109,9 +110,9 @@ if not st.session_state['logado']:
             else:
                 st.warning("⚠️ Preencha todos os campos obrigatórios.")
 
-# --- SISTEMA CONECTADO ---
+# --- SISTEMA CONECTADO E SEPARADO ---
 else:
-    # Topo do aplicativo
+    # Cabeçalho de Identificação e Botão Sair comum
     col_user, col_logout = st.columns([8, 2])
     with col_user:
         nome_exibicao = "Almoxarife Principal" if st.session_state['eh_almoxarife'] else st.session_state['usuario_nome']
@@ -123,29 +124,32 @@ else:
             st.rerun()
     st.divider()
 
-    # --- 🔑 ACESSO DO ALMOXARIFE ---
+    # =========================================================================
+    # 2º ACESSO: EXCLUSIVO DO ALMOXARIFE
+    # =========================================================================
     if st.session_state['eh_almoxarife']:
-        st.title("🔑 Painel de Triagem (Almoxarifado)")
-        st.markdown("Gerencie as solicitações recebidas, exporte os seriais e valide a entrega física.")
+        st.title("🔑 Painel de Triagem (Visão do Almoxarife)")
+        st.markdown("Gerencie as solicitações recebidas, valide os aparelhos e mude o status para liberação do balcão.")
         
+        # Carrega os agendamentos ativos na tela do almoxarife
         df_agendamentos = pd.read_sql_query("SELECT * FROM agendamentos WHERE status != 'Finalizado'", conn)
         
         if df_agendamentos.empty:
-            st.info("Visualização limpa. Não há devoluções pendentes na fila.")
+            st.info("Visualização limpa. Não há solicitações pendentes no momento.")
         else:
             for idx, row in df_agendamentos.iterrows():
                 lista_seriais = [s.strip() for s in row['seriais'].split(",") if s.strip()]
                 
-                with st.expander(f"📁 Pasta: Protocolo #{row['id']} | Volante: {row['nome']} | Status: {row['status']}"):
-                    st.markdown(f"**Data Agendada:** {row['data']} às {row['hora']} | **CPF:** {row['cpf']}")
+                with st.expander(f"📁 Pasta Aberta: Protocolo #{row['id']} | Volante: {row['nome']} | Status: {row['status']}"):
+                    st.markdown(f"**Data Planejada:** {row['data']} às {row['hora']} | **CPF Volante:** {row['cpf']}")
                     
-                    # Tabela visível para o Almoxarife
+                    # Tabela visível dos aparelhos bipados
                     dados_excel, df_visualizar = gerar_excel(lista_seriais)
                     st.dataframe(df_visualizar, use_container_width=True)
                     
-                    # Download do Excel para o Almoxarife
+                    # Botão de exportação exclusivo para o almoxarife baixar
                     st.download_button(
-                        label="📥 Exportar Seriais para Excel (.xlsx)",
+                        label="📥 Exportar Fila para Excel (.xlsx)",
                         data=dados_excel,
                         file_name=f"almoxarifado_protocolo_{row['id']}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -156,57 +160,59 @@ else:
                     col_b1, col_b2 = st.columns(2)
                     with col_b1:
                         if row['status'] == "Aguardando Triagem":
-                            if st.button("🚀 Validar e Liberar para o Balcão", key=f"lib_{row['id']}", use_container_width=True):
+                            if st.button("🚀 Validar e Colocar Disponível para Receber", key=f"lib_{row['id']}", use_container_width=True):
                                 cursor.execute("UPDATE agendamentos SET status = 'Disponível para Receber' WHERE id = ?", (row['id'],))
                                 conn.commit()
+                                st.success("Atualizado! O Volante agora visualiza que o balcão está pronto.")
                                 st.rerun()
                     with col_b2:
                         if row['status'] == "Disponível para Receber":
-                            if st.button("📥 Confirmar Recebimento Físico e Fechar", key=f"fec_{row['id']}", type="primary", use_container_width=True):
+                            if st.button("📥 Fechar Devolução (Aparelhos Entregues no Físico)", key=f"fec_{row['id']}", type="primary", use_container_width=True):
                                 cursor.execute("UPDATE agendamentos SET status = 'Finalizado' WHERE id = ?", (row['id'],))
                                 conn.commit()
+                                st.success("Perfeito! Devolução encerrada sem lentidão de sistema.")
                                 st.rerun()
 
-    # --- 👤 ACESSO DO VOLANTE ---
+    # =========================================================================
+    # 1º ACESSO: EXCLUSIVO DO VOLANTE
+    # =========================================================================
     else:
-        st.title("📦 Solicitação de Devolução Antecipada")
+        st.title("📦 Solicitação de Devolução Antecipada (Visão do Volante)")
         
         cursor.execute("SELECT id, data, hora, status, seriais FROM agendamentos WHERE cpf = ? AND status != 'Finalizado'", (st.session_state['usuario_cpf'],))
         agendamento_ativo = cursor.fetchone()
         
         if agendamento_ativo:
-            # Desempacota os dados da solicitação atual do Volante
             proto_id, proto_data, proto_hora, proto_status, proto_seriais = agendamento_ativo
             lista_seriais_volante = [s.strip() for s in proto_seriais.split(",") if s.strip()]
             
-            st.info(f"📆 Você já possui uma solicitação ativa (Protocolo #{proto_id}) para o dia {proto_data} às {proto_hora}.")
-            st.markdown(f"**Status Atual:** `{proto_status}`")
+            st.info(f"📆 Você possui uma solicitação ativa (Protocolo #{proto_id}) marcada para o dia {proto_data} às {proto_hora}.")
             
+            # Avisos dinâmicos baseados no que o Almoxarife mudou na tela dele
             if proto_status == "Aguardando Triagem":
-                st.warning("⏳ Aguarde o almoxarife validar seus seriais para liberar sua vinda ao balcão.")
+                st.warning("⏳ Status Atual: **Aguardando Triagem**. Aguarde o almoxarife validar seus seriais para liberar sua ida ao balcão.")
             elif proto_status == "Disponível para Receber":
-                st.success("🟢 Seu agendamento foi liberado! Pode se dirigir ao balcão do almoxarifado para a entrega física.")
+                st.success("🟢 Status Atual: **Disponível para Receber!** O almoxarife validou seus dados. Pode levar os aparelhos físicos ao almoxarifado.")
             
-            # --- 🛠️ PASTA DO VOLANTE (VISUALIZAR E EXPORTAR EXCEL) ---
+            # --- PASTA EXCLUSIVA DO VOLANTE PARA VISUALIZAÇÃO E EXCEL ---
             st.markdown("---")
-            st.subheader(f"📁 Pasta de Devolução - Protocolo #{proto_id}")
+            st.subheader(f"📁 Minha Pasta de Entrega - Protocolo #{proto_id}")
+            st.markdown("Confira abaixo todos os aparelhos que você bipou nesta solicitação:")
             
-            # Mostra a tabela para o volante ver o que bipou
             dados_excel_volante, df_visualizar_volante = gerar_excel(lista_seriais_volante)
             st.dataframe(df_visualizar_volante, use_container_width=True)
             
-            # Permite ao volante exportar a própria lista
             st.download_button(
-                label="📥 Exportar Minha Lista para Excel (.xlsx)",
+                label="📥 Exportar Meus Aparelhos Bipados para Excel (.xlsx)",
                 data=dados_excel_volante,
-                file_name=f"minha_devolucao_protocolo_{proto_id}.xlsx",
+                file_name=f"minha_lista_protocolo_{proto_id}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key=f"excel_volante_{proto_id}"
             )
             
         else:
-            # Tela Inicial do Volante (Sem agendamento)
-            st.header("Agende sua Entrega")
+            # Tela Inicial para criar agendamentos (Apenas aparece se ele não tiver nenhuma pendente)
+            st.header("Agende sua Nova Entrega")
             col1, col2 = st.columns(2)
             with col1:
                 data_agenda = st.date_input("Selecione a Data", min_value=datetime.date.today())
@@ -214,9 +220,9 @@ else:
                 hora_agenda = st.time_input("Selecione o Horário")
                 
             st.subheader("Bipar Equipamentos")
-            st.markdown("Clique na caixa de texto abaixo e comece a bipar os seriais com o seu leitor:")
+            st.markdown("Dê um clique na caixa de texto abaixo e comece a bipar os seriais com o seu leitor:")
             
-            equipamentos_bipados = st.text_area("Seriais (Um por linha)", height=150, placeholder="Bipe o código...\nBipe o próximo...")
+            equipamentos_bipados = st.text_area("Seriais (Insira um por linha)", height=150, placeholder="Bipe o código...\nBipe o próximo...")
             
             if st.button("Fechar Devolução e Enviar para Triagem", type="primary", use_container_width=True):
                 if equipamentos_bipados.strip():
@@ -231,7 +237,7 @@ else:
                             (st.session_state['usuario_cpf'], st.session_state['usuario_nome'], str(data_agenda), str(hora_agenda)[:5], seriais_str)
                         )
                         conn.commit()
-                        st.success("✅ Devolução fechada com sucesso!")
+                        st.success("✅ Devolução fechada com sucesso! Pasta de triagem criada.")
                         st.rerun()
                     else:
                         st.error(msg_erro)
