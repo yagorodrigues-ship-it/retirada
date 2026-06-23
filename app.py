@@ -2,20 +2,21 @@ import streamlit as st
 import pandas as pd
 import datetime
 import sqlite3
-from io import BytesIO
 
 # Configuração da página
-st.set_page_config(page_title="Almoxarifado Inteligente", layout="wide", page_icon="📦")
+st.set_page_config(page_title="Almoxarifado Inteligente - Gestão", layout="wide", page_icon="📦")
 
-# --- BANCO DE DADOS (Configuração Inicial) ---
+# --- BANCO DE DADOS (Configuração Atualizada) ---
 def conectar_bd():
     conn = sqlite3.connect('almoxarifado.db')
     cursor = conn.cursor()
+    # Adicionada coluna 'perfil' para gerenciar se é Volante ou Almoxarife
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS usuarios (
             cpf TEXT PRIMARY KEY,
             nome TEXT,
-            senha TEXT
+            senha TEXT,
+            perfil TEXT DEFAULT 'Volante'
         )
     ''')
     cursor.execute('''
@@ -25,10 +26,25 @@ def conectar_bd():
             nome TEXT,
             data TEXT,
             hora TEXT,
-            seriais TEXT,
-            status TEXT
+            status TEXT DEFAULT 'Aguardando Triagem'
         )
     ''')
+    # Tabela filha para gerenciar o status individual de cada serial bipado
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS itens_agendamento (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agendamento_id INTEGER,
+            serial TEXT,
+            status_item TEXT DEFAULT 'Aguardando devolução',
+            FOREIGN KEY(agendamento_id) REFERENCES agendamentos(id)
+        )
+    ''')
+    
+    # Garante que o usuário admin padrão exista e seja Almoxarife
+    cursor.execute("SELECT * FROM usuarios WHERE cpf = '000'")
+    if not cursor.fetchone():
+        cursor.execute("INSERT INTO usuarios VALUES ('000', 'Administrador Principal', 'admin', 'Almoxarife')")
+        
     conn.commit()
     return conn
 
@@ -40,61 +56,38 @@ if 'logado' not in st.session_state:
     st.session_state['logado'] = False
     st.session_state['usuario_cpf'] = ""
     st.session_state['usuario_nome'] = ""
-    st.session_state['eh_almoxarife'] = False
+    st.session_state['perfil'] = "Volante"
+    st.session_state['protocolo_detalhe'] = None  # Controla a nova tela de detalhes do admin
 
-# --- FUNÇÕES DE VALIDAÇÃO E EXCEL ---
-def verificar_regras_agendamento(data_selecionada, hora_selecionada):
-    cursor.execute("SELECT hora FROM agendamentos WHERE data = ? AND status != 'Finalizado'", (str(data_selecionada),))
-    agendamentos_dia = cursor.fetchall()
-    
-    nova_hora_minutos = hora_selecionada.hour * 60 + hora_selecionada.minute
-    
-    for (h,) in agendamentos_dia:
-        h_atual = datetime.datetime.strptime(h, "%H:%M").time()
-        atual_minutos = h_atual.hour * 60 + h_atual.minute
-        
-        # Regra: Intervalo mínimo de 3 horas (180 minutos) entre agendamentos
-        if abs(nova_hora_minutos - atual_minutos) < 180:
-            return False, f"⚠️ Horário indisponível! Outra pessoa agendou às {h}. É necessário um intervalo mínimo de 3 horas."
-            
-    return True, ""
-
-def gerar_excel_nativo(lista_seriais):
-    df_seriais = pd.DataFrame({"Seriais dos Equipamentos": lista_seriais})
-    # Converte os dados nativamente para CSV com formatação compatível com Excel (UTF-8 com BOM e ponto-e-vírgula)
-    # Isso abre direto no Excel perfeitamente sem quebrar acentos ou colunas
-    csv_data = df_seriais.to_csv(index=False, sep=';', encoding='utf-8-sig')
-    return csv_data.encode('utf-8-sig'), df_seriais
+# --- FUNÇÕES DE CONVERSÃO EXCEL/CSV NATIVO ---
+def gerar_excel_nativo(df):
+    csv_data = df.to_csv(index=False, sep=';', encoding='utf-8-sig')
+    return csv_data.encode('utf-8-sig')
 
 # --- TELA DE LOGIN E CADASTRO ---
 if not st.session_state['logado']:
-    st.title("📦 Acesso ao Sistema de Devolução")
-    
-    aba_login, aba_cadastro = st.tabs(["🔐 Entrar no Sistema", "📝 Criar Cadastro de Volante"])
+    st.title("📦 Sistema de Devolução Antecipada")
+    aba_login, aba_cadastro = st.tabs(["🔐 Entrar no Sistema", "📝 Criar Cadastro"])
     
     with aba_login:
-        cpf_login = st.text_input("Digite seu CPF (ou 000 para Almoxarife)", key="login_cpf")
+        cpf_login = st.text_input("Digite seu CPF", key="login_cpf")
         senha_login = st.text_input("Senha", type="password", key="login_senha")
         
         if st.button("Acessar Sistema", type="primary", use_container_width=True):
-            if cpf_login == "000" and senha_login == "admin":  
+            cursor.execute("SELECT nome, perfil FROM usuarios WHERE cpf = ? AND senha = ?", (cpf_login, senha_login))
+            usuario = cursor.fetchone()
+            if usuario:
                 st.session_state['logado'] = True
-                st.session_state['eh_almoxarife'] = True
+                st.session_state['usuario_cpf'] = cpf_login
+                st.session_state['usuario_nome'] = usuario[0]
+                st.session_state['perfil'] = usuario[1]
+                st.session_state['protocolo_detalhe'] = None
                 st.rerun()
             else:
-                cursor.execute("SELECT nome FROM usuarios WHERE cpf = ? AND senha = ?", (cpf_login, senha_login))
-                usuario = cursor.fetchone()
-                if usuario:
-                    st.session_state['logado'] = True
-                    st.session_state['usuario_cpf'] = cpf_login
-                    st.session_state['usuario_nome'] = usuario[0]
-                    st.session_state['eh_almoxarife'] = False
-                    st.rerun()
-                else:
-                    st.error("❌ CPF ou Senha incorretos.")
+                st.error("❌ CPF ou Senha incorretos.")
                     
     with aba_cadastro:
-        st.markdown("### Cadastro exclusivo para novos Volantes")
+        st.markdown("### Cadastro de Novos Usuários")
         novo_cpf = st.text_input("Defina seu CPF")
         novo_nome = st.text_input("Nome Completo")
         nova_senha = st.text_input("Crie uma Senha", type="password")
@@ -102,111 +95,163 @@ if not st.session_state['logado']:
         if st.button("Salvar Cadastro", use_container_width=True):
             if novo_cpf and novo_nome and nova_senha:
                 try:
-                    cursor.execute("INSERT INTO usuarios VALUES (?, ?, ?)", (novo_cpf, novo_nome, nova_senha))
+                    cursor.execute("INSERT INTO usuarios (cpf, nome, senha, perfil) VALUES (?, ?, ?, 'Volante')", (novo_cpf, novo_nome, nova_senha))
                     conn.commit()
-                    st.success("✅ Cadastro realizado com sucesso! Vá para a aba 'Entrar no Sistema'.")
+                    st.success("✅ Cadastro realizado como Volante! Faça login na aba ao lado.")
                 except sqlite3.IntegrityError:
                     st.error("⚠️ Este CPF já está registrado.")
             else:
-                st.warning("⚠️ Preencha todos os campos obrigatórios.")
+                st.warning("⚠️ Preencha todos os campos.")
 
-# --- SISTEMA CONECTADO E SEPARADO ---
+# --- SISTEMA CONECTADO ---
 else:
-    # Cabeçalho de Identificação e Botão Sair comum
+    # Barra de Status Superior comum
     col_user, col_logout = st.columns([8, 2])
     with col_user:
-        nome_exibicao = "Almoxarife Principal" if st.session_state['eh_almoxarife'] else st.session_state['usuario_nome']
-        st.markdown(f"👤 Conectado como: **{nome_exibicao}**")
+        st.markdown(f"👤 Conectado como: **{st.session_state['usuario_nome']}** | Perfil: `{st.session_state['perfil']}`")
     with col_logout:
         if st.button("Sair do Sistema ➔", use_container_width=True):
             st.session_state['logado'] = False
-            st.session_state['eh_almoxarife'] = False
+            st.session_state['protocolo_detalhe'] = None
             st.rerun()
     st.divider()
 
     # =========================================================================
-    # 2º ACESSO: EXCLUSIVO DO ALMOXARIFE
+    # VISÃO DO ADMINISTRADOR (ALMOXARIFE)
     # =========================================================================
-    if st.session_state['eh_almoxarife']:
-        st.title("🔑 Painel de Triagem (Visão do Almoxarife)")
-        st.markdown("Gerencie as solicitações recebidas, valide os aparelhos e mude o status para liberação do balcão.")
+    if st.session_state['perfil'] == 'Almoxarife':
         
-        df_agendamentos = pd.read_sql_query("SELECT * FROM agendamentos WHERE status != 'Finalizado'", conn)
-        
-        if df_agendamentos.empty:
-            st.info("Visualização limpa. Não há solicitações pendentes no momento.")
-        else:
-            for idx, row in df_agendamentos.iterrows():
-                lista_seriais = [s.strip() for s in row['seriais'].split(",") if s.strip()]
+        # Se o admin clicou para ver os detalhes de uma pasta/protocolo específico, abre a NOVA TELA dedicada
+        if st.session_state['protocolo_detalhe'] is not None:
+            id_proto = st.session_state['protocolo_detalhe']
+            
+            # Busca metadados da pasta
+            cursor.execute("SELECT nome, data, hora, status FROM agendamentos WHERE id = ?", (id_proto,))
+            dados_p = cursor.fetchone()
+            
+            if st.button("⬅️ Voltar para o Painel Principal"):
+                st.session_state['protocolo_detalhe'] = None
+                st.rerun()
                 
-                with st.expander(f"📁 Pasta Aberta: Protocolo #{row['id']} | Volante: {row['nome']} | Status: {row['status']}"):
-                    st.markdown(f"**Data Planejada:** {row['data']} às {row['hora']} | **CPF Volante:** {row['cpf']}")
-                    
-                    # Tabela visível dos aparelhos bipados
-                    dados_excel, df_visualizar = gerar_excel_nativo(lista_seriais)
-                    st.dataframe(df_visualizar, use_container_width=True)
-                    
-                    # Botão de exportação nativo Excel (.csv configurado para Excel)
-                    st.download_button(
-                        label="📥 Exportar Fila para Excel (.csv)",
-                        data=dados_excel,
-                        file_name=f"almoxarifado_protocolo_{row['id']}.csv",
-                        mime="text/csv",
-                        key=f"excel_almox_{row['id']}"
+            st.title(f"📁 Pasta de Entrega - Protocolo #{id_proto}")
+            st.markdown(f"**Volante:** {dados_p[0]} | **Previsão:** {dados_p[1]} às {dados_p[2]} | **Status Geral:** {dados_p[3]}")
+            st.write("Altere abaixo o status individual de cada equipamento bipado:")
+            
+            # Lista os itens da pasta
+            cursor.execute("SELECT id, serial, status_item FROM itens_agendamento WHERE agendamento_id = ?", (id_proto,))
+            itens = cursor.fetchall()
+            
+            lista_status_opcoes = [
+                "Aguardando devolução", 
+                "Equipamento não localizado", 
+                "Aparelho recebido", 
+                "Processo finalizado", 
+                "Aguardando aprovação de campo"
+            ]
+            
+            # Cria a estrutura de edição item por item
+            for item_id, serial, status_atual in itens:
+                col_ser, col_stat = st.columns([4, 6])
+                with col_ser:
+                    st.info(f"🔢 Serial: **{serial}**")
+                with col_stat:
+                    idx_default = lista_status_opcoes.index(status_atual) if status_atual in lista_status_opcoes else 0
+                    novo_status_item = st.selectbox(
+                        "Status do Equipamento",
+                        options=lista_status_opcoes,
+                        index=idx_default,
+                        key=f"sel_item_{item_id}"
                     )
-                    
-                    st.write("")
-                    col_b1, col_b2 = st.columns(2)
-                    with col_b1:
-                        if row['status'] == "Aguardando Triagem":
-                            if st.button("🚀 Validar e Colocar Disponível para Receber", key=f"lib_{row['id']}", use_container_width=True):
-                                cursor.execute("UPDATE agendamentos SET status = 'Disponível para Receber' WHERE id = ?", (row['id'],))
+                    # Atualiza imediatamente no banco de dados se for mudado
+                    if novo_status_item != status_atual:
+                        cursor.execute("UPDATE itens_agendamento SET status_item = ? WHERE id = ?", (novo_status_item, item_id))
+                        conn.commit()
+                        st.toast(f"Status do serial {serial} atualizado!")
+
+            st.markdown("---")
+            # Exportação dedicada da pasta para Excel/CSV
+            df_export = pd.read_sql_query(f"SELECT serial as 'Serial', status_item as 'Status do Item' FROM itens_agendamento WHERE agendamento_id = {id_proto}", conn)
+            dados_csv = gerar_excel_nativo(df_export)
+            st.download_button(
+                label="📥 Baixar Dados desta Pasta para Excel (.csv)",
+                data=dados_csv,
+                file_name=f"protocolo_{id_proto}_detalhado.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+            
+        else:
+            # Painel Principal do Administrador
+            st.title("🔑 Painel de Controle e Gestão (Mestre)")
+            
+            aba_triagem, aba_usuarios = st.tabs(["📋 Pastas de Triagem", "👥 Gerenciar Permissões (Volante / Almoxarife)"])
+            
+            with aba_triagem:
+                st.subheader("Solicitações Recebidas")
+                df_pastas = pd.read_sql_query("SELECT id as 'Protocolo', nome as 'Volante', data as 'Data', hora as 'Horário', status as 'Status Geral' FROM agendamentos WHERE status != 'Finalizado'", conn)
+                
+                if df_pastas.empty:
+                    st.info("Nenhuma pasta pendente no momento.")
+                else:
+                    for idx, row in df_pastas.iterrows():
+                        with st.container(border=True):
+                            c1, c2, c3 = st.columns([6, 2, 2])
+                            with c1:
+                                st.markdown(f"**Protocolo #{row['Protocolo']}** — Volante: {row['Volante']} ({row['Data']} às {row['Horário']})")
+                                st.caption(f"Status Atual: {row['Status Geral']}")
+                            with c2:
+                                if st.button("👁️ Abrir em Nova Tela", key=f"abrir_{row['Protocolo']}", use_container_width=True):
+                                    st.session_state['protocolo_detalhe'] = int(row['Protocolo'])
+                                    st.rerun()
+                            with c3:
+                                if st.button("✅ Encerrar Protocolo", key=f"fim_{row['Protocolo']}", type="primary", use_container_width=True):
+                                    cursor.execute("UPDATE agendamentos SET status = 'Finalizado' WHERE id = ?", (row['Protocolo'],))
+                                    cursor.execute("UPDATE itens_agendamento SET status_item = 'Processo finalizado' WHERE agendamento_id = ?", (row['Protocolo'],))
+                                    conn.commit()
+                                    st.success("Protocolo finalizado por completo!")
+                                    st.rerun()
+                                    
+            with aba_usuarios:
+                st.subheader("Controle de Níveis de Acesso")
+                st.markdown("Altere abaixo quem atua como Volante em campo e quem gerencia como Almoxarife no Balcão:")
+                
+                # Lista todos os usuários cadastrados (exceto o próprio admin master logado de CPF 000 para evitar bloqueios)
+                cursor.execute("SELECT cpf, nome, perfil FROM usuarios WHERE cpf != '000'")
+                usuarios_cadastrados = cursor.fetchall()
+                
+                for cpf, nome, perfil_atual in usuarios_cadastrados:
+                    with st.container(border=True):
+                        col_info, col_acao = st.columns([7, 3])
+                        with col_info:
+                            st.markdown(f"👤 **{nome}** | CPF: `{cpf}`")
+                            st.markdown(f"Função Atual: **{perfil_atual}**")
+                        with col_acao:
+                            novo_perfil = "Almoxarife" if perfil_atual == "Volante" else "Volante"
+                            texto_botao = "Promover a Almoxarife 🔑" if perfil_atual == "Volante" else "Mudar para Volante 🚗"
+                            
+                            if st.button(texto_botao, key=f"perfil_{cpf}", use_container_width=True):
+                                cursor.execute("UPDATE usuarios SET perfil = ? WHERE cpf = ?", (novo_perfil, cpf))
                                 conn.commit()
-                                st.success("Atualizado! O Volante agora visualiza que o balcão está pronto.")
-                                st.rerun()
-                    with col_b2:
-                        if row['status'] == "Disponível para Receber":
-                            if st.button("📥 Fechar Devolução (Aparelhos Entregues no Físico)", key=f"fec_{row['id']}", type="primary", use_container_width=True):
-                                cursor.execute("UPDATE agendamentos SET status = 'Finalizado' WHERE id = ?", (row['id'],))
-                                conn.commit()
-                                st.success("Perfeito! Devolução encerrada sem lentidão de sistema.")
+                                st.success(f"Perfil de {nome} alterado para {novo_perfil}!")
                                 st.rerun()
 
     # =========================================================================
-    # 1º ACESSO: EXCLUSIVO DO VOLANTE
+    # VISÃO DO VOLANTE
     # =========================================================================
     else:
         st.title("📦 Solicitação de Devolução Antecipada (Visão do Volante)")
         
-        cursor.execute("SELECT id, data, hora, status, seriais FROM agendamentos WHERE cpf = ? AND status != 'Finalizado'", (st.session_state['usuario_cpf'],))
+        cursor.execute("SELECT id, data, hora, status FROM agendamentos WHERE cpf = ? AND status != 'Finalizado'", (st.session_state['usuario_cpf'],))
         agendamento_ativo = cursor.fetchone()
         
         if agendamento_ativo:
-            proto_id, proto_data, proto_hora, proto_status, proto_seriais = agendamento_ativo
-            lista_seriais_volante = [s.strip() for s in proto_seriais.split(",") if s.strip()]
+            proto_id, proto_data, proto_hora, proto_status = agendamento_ativo
+            st.info(f"📆 Você possui uma solicitação ativa (Protocolo #{proto_id}) marcada para o dia {proto_data} às {proto_hora}.")
             
-            st.info(f"📆 Você possui uma solicitação activa (Protocolo #{proto_id}) marcada para o dia {proto_data} às {proto_hora}.")
-            
-            if proto_status == "Aguardando Triagem":
-                st.warning("⏳ Status Atual: **Aguardando Triagem**. Aguarde o almoxarife validar seus seriais para liberar sua ida ao balcão.")
-            elif proto_status == "Disponível para Receber":
-                st.success("🟢 Status Atual: **Disponível para Receber!** O almoxarife validou seus dados. Pode levar os aparelhos físicos ao almoxarifado.")
-            
-            # --- PASTA EXCLUSIVA DO VOLANTE PARA VISUALIZAÇÃO E EXCEL ---
-            st.markdown("---")
-            st.subheader(f"📁 Minha Pasta de Entrega - Protocolo #{proto_id}")
-            st.markdown("Confira abaixo todos os aparelhos que você bipou nesta solicitação:")
-            
-            dados_excel_volante, df_visualizar_volante = gerar_excel_nativo(lista_seriais_volante)
-            st.dataframe(df_visualizar_volante, use_container_width=True)
-            
-            st.download_button(
-                label="📥 Exportar Meus Aparelhos Bipados para Excel (.csv)",
-                data=dados_excel_volante,
-                file_name=f"minha_lista_protocolo_{proto_id}.csv",
-                mime="text/csv",
-                key=f"excel_volante_{proto_id}"
-            )
+            st.markdown("### 📋 Status dos Meus Equipamentos Bipados")
+            # Exibe a lista de itens com os status reais atualizados pelo almoxarife
+            df_meus_itens = pd.read_sql_query(f"SELECT serial as 'Serial do Equipamento', status_item as 'Status de Triagem' FROM itens_agendamento WHERE agendamento_id = {proto_id}", conn)
+            st.dataframe(df_meus_itens, use_container_width=True)
             
         else:
             st.header("Agende sua Nova Entrega")
@@ -217,26 +262,25 @@ else:
                 hora_agenda = st.time_input("Selecione o Horário")
                 
             st.subheader("Bipar Equipamentos")
-            st.markdown("Dê um clique na caixa de texto abaixo e comece a bipar os seriais com o seu leitor:")
-            
             equipamentos_bipados = st.text_area("Seriais (Insira um por linha)", height=150, placeholder="Bipe o código...\nBipe o próximo...")
             
             if st.button("Fechar Devolução e Enviar para Triagem", type="primary", use_container_width=True):
                 if equipamentos_bipados.strip():
                     lista_limpa = [item.strip() for item in equipamentos_bipados.replace(",", "\n").split("\n") if item.strip()]
-                    seriais_str = ",".join(lista_limpa)
                     
-                    valido, msg_erro = verificar_regras_agendamento(data_agenda, hora_agenda)
+                    # Salva o cabeçalho do agendamento
+                    cursor.execute(
+                        "INSERT INTO agendamentos (cpf, nome, data, hora, status) VALUES (?, ?, ?, ?, 'Aguardando Triagem')",
+                        (st.session_state['usuario_cpf'], st.session_state['usuario_nome'], str(data_agenda), str(hora_agenda)[:5])
+                    )
+                    novo_id_agendamento = cursor.lastrowid
                     
-                    if valido:
-                        cursor.execute(
-                            "INSERT INTO agendamentos (cpf, nome, data, hora, seriais, status) VALUES (?, ?, ?, ?, ?, 'Aguardando Triagem')",
-                            (st.session_state['usuario_cpf'], st.session_state['usuario_nome'], str(data_agenda), str(hora_agenda)[:5], seriais_str)
-                        )
-                        conn.commit()
-                        st.success("✅ Devolução fechada com sucesso! Pasta de triagem criada.")
-                        st.rerun()
-                    else:
-                        st.error(msg_erro)
+                    # Salva cada serial separadamente na tabela de itens
+                    for srl in lista_limpa:
+                        cursor.execute("INSERT INTO itens_agendamento (agendamento_id, serial) VALUES (?, ?)", (novo_id_agendamento, srl))
+                        
+                    conn.commit()
+                    st.success("✅ Pasta de triagem gerada com sucesso!")
+                    st.rerun()
                 else:
-                    st.error("⚠️ Erro: Você precisa bipar pelo menos 1 equipamento antes de enviar.")
+                    st.error("⚠️ Você precisa bipar pelo menos 1 equipamento.")
