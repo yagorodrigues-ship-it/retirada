@@ -3,6 +3,16 @@ import pandas as pd
 import datetime
 import sqlite3
 from io import BytesIO
+import subprocess
+import sys
+
+# --- MECANISMO DE AUTO-CORREÇÃO DE DEPENDÊNCIAS ---
+# Tenta importar o xlsxwriter. Se falhar, força a instalação em tempo de execução.
+try:
+    import xlsxwriter
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "xlsxwriter"])
+    import xlsxwriter
 
 # Configuração da página
 st.set_page_config(page_title="Almoxarifado Inteligente", layout="wide", page_icon="📦")
@@ -62,9 +72,15 @@ def verificar_regras_agendamento(data_selecionada, hora_selecionada):
 def gerar_excel(lista_seriais):
     buffer = BytesIO()
     df_seriais = pd.DataFrame({"Seriais dos Equipamentos": lista_seriais})
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        df_seriais.to_excel(writer, index=False, sheet_name='Seriais_Devolvidos')
-    return buffer.getvalue(), df_seriais
+    try:
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            df_seriais.to_excel(writer, index=False, sheet_name='Seriais_Devolvidos')
+        return buffer.getvalue(), df_seriais
+    except Exception:
+        # Fallback de segurança usando o mecanismo padrão do pandas caso falte engine
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df_seriais.to_excel(writer, index=False, sheet_name='Seriais_Devolvidos')
+        return buffer.getvalue(), df_seriais
 
 # --- TELA DE LOGIN E CADASTRO ---
 if not st.session_state['logado']:
